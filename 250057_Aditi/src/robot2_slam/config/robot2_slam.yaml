@@ -1,0 +1,23 @@
+/**:
+  ros__parameters:
+    use_sim_time: true
+    solver_plugin: solver_plugins::CeresSolver
+    ceres_linear_solver: SPARSE_NORMAL_CHOLESKY
+    ceres_preconditioner: JACOBI
+    ceres_trust_strategy: LEVENBERG_MARQUARDT
+    
+    # Frame configurations for Robot 2
+    odom_frame: robot2/odom
+    map_frame: robot2/map
+    base_frame: robot2/base_footprint
+    scan_topic: /robot2/scan
+    
+    # Map publication
+    map_name: /robot2/map
+    map_start_at_dock: true
+    
+    # Process rate & timing
+    transform_timeout: 0.2
+    tf_buffer_duration: 30.0
+    stack_size_to_use: 40000000
+    enable_interactive_mode: true
