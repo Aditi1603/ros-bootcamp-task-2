@@ -1,8 +1,11 @@
 import rclpy
 from rclpy.node import Node
+
 from nav_msgs.msg import OccupancyGrid
+
 import numpy as np
 import cv2
+import copy
 
 
 class MapMerger(Node):
@@ -12,8 +15,13 @@ class MapMerger(Node):
 
         self.map1 = None
         self.map2 = None
+
         self.info1 = None
         self.info2 = None
+
+        # -------------------------------------------------
+        # Subscribers
+        # -------------------------------------------------
 
         self.sub1 = self.create_subscription(
             OccupancyGrid,
@@ -29,20 +37,35 @@ class MapMerger(Node):
             10
         )
 
+        # -------------------------------------------------
+        # Publisher
+        # -------------------------------------------------
+
         self.pub = self.create_publisher(
             OccupancyGrid,
             '/global_map',
             10
         )
 
+        # -------------------------------------------------
+        # Merge timer
+        # -------------------------------------------------
+
         self.timer = self.create_timer(
             2.0,
             self.merge_maps
         )
 
-        self.get_logger().info('Map Merger started.')
+        self.get_logger().info(
+            'Map Merger started.'
+        )
+
+    # =====================================================
+    # MAP CALLBACKS
+    # =====================================================
 
     def map1_cb(self, msg):
+
         self.map1 = np.array(
             msg.data,
             dtype=np.int8
@@ -50,9 +73,10 @@ class MapMerger(Node):
             (msg.info.height, msg.info.width)
         )
 
-        self.info1 = msg.info
+        self.info1 = copy.deepcopy(msg.info)
 
     def map2_cb(self, msg):
+
         self.map2 = np.array(
             msg.data,
             dtype=np.int8
@@ -60,19 +84,32 @@ class MapMerger(Node):
             (msg.info.height, msg.info.width)
         )
 
-        self.info2 = msg.info
+        self.info2 = copy.deepcopy(msg.info)
+
+    # =====================================================
+    # CONVERT OCCUPANCY GRID TO IMAGE
+    # =====================================================
 
     def to_image(self, grid):
         """
-        Convert OccupancyGrid values into an image suitable
-        for feature detection.
+        Convert OccupancyGrid values into an image
+        suitable for ORB feature detection.
 
-        Unknown = 127
-        Free    = 255
-        Occupied = 0
+        OccupancyGrid:
+            -1 = unknown
+             0 = free
+           100 = occupied
+
+        Image:
+            127 = unknown
+            255 = free
+              0 = occupied
         """
 
-        img = np.zeros_like(grid, dtype=np.uint8)
+        img = np.zeros(
+            grid.shape,
+            dtype=np.uint8
+        )
 
         img[grid == -1] = 127
         img[grid == 0] = 255
@@ -80,12 +117,18 @@ class MapMerger(Node):
 
         return img
 
+    # =====================================================
+    # MERGE OCCUPANCY VALUES
+    # =====================================================
+
     def merge_values(self, map1, map2):
         """
-        Merge occupancy values.
+        Merge two occupancy grids.
 
-        Unknown does not overwrite known space.
-        Occupied has priority over free.
+        Rules:
+            - Unknown does not overwrite known cells.
+            - Known cells are preserved.
+            - Occupied cells have priority.
         """
 
         result = np.full(
@@ -94,24 +137,50 @@ class MapMerger(Node):
             dtype=np.int8
         )
 
-        # Map 1 known cells
+        # -------------------------------------------------
+        # Copy known cells from map 1
+        # -------------------------------------------------
+
         known1 = map1 >= 0
+
         result[known1] = map1[known1]
 
-        # Map 2 known cells
+        # -------------------------------------------------
+        # Copy known cells from map 2
+        # where map 1 is unknown
+        # -------------------------------------------------
+
         known2 = map2 >= 0
 
-        # Where result is still unknown
-        new_cells = known2 & (result == -1)
+        new_cells = (
+            known2 &
+            (result == -1)
+        )
+
         result[new_cells] = map2[new_cells]
 
+        # -------------------------------------------------
         # Occupied has priority
-        occupied = known2 & (map2 == 100)
+        # -------------------------------------------------
+
+        occupied = (
+            known2 &
+            (map2 == 100)
+        )
+
         result[occupied] = 100
 
         return result
 
+    # =====================================================
+    # MAIN MERGING FUNCTION
+    # =====================================================
+
     def merge_maps(self):
+
+        # -------------------------------------------------
+        # Wait until both maps are available
+        # -------------------------------------------------
 
         if self.map1 is None or self.map2 is None:
             return
@@ -121,20 +190,29 @@ class MapMerger(Node):
 
         try:
 
+            # =================================================
+            # GET MAP SIZES
+            # =================================================
+
             h1, w1 = self.map1.shape
             h2, w2 = self.map2.shape
 
             self.get_logger().debug(
-                f'Map sizes: robot1={w1}x{h1}, '
+                f'Map sizes: '
+                f'robot1={w1}x{h1}, '
                 f'robot2={w2}x{h2}'
             )
+
+            # =================================================
+            # CONVERT MAPS TO IMAGES
+            # =================================================
 
             img1 = self.to_image(self.map1)
             img2 = self.to_image(self.map2)
 
-            # -------------------------------------------------
-            # Make both images the same size for ORB matching
-            # -------------------------------------------------
+            # =================================================
+            # COMMON IMAGE SIZE
+            # =================================================
 
             H = max(h1, h2)
             W = max(w1, w2)
@@ -151,12 +229,19 @@ class MapMerger(Node):
                 dtype=np.uint8
             )
 
-            padded1[:h1, :w1] = img1
-            padded2[:h2, :w2] = img2
+            padded1[
+                :h1,
+                :w1
+            ] = img1
 
-            # -------------------------------------------------
-            # ORB feature detection
-            # -------------------------------------------------
+            padded2[
+                :h2,
+                :w2
+            ] = img2
+
+            # =================================================
+            # ORB FEATURE DETECTION
+            # =================================================
 
             orb = cv2.ORB_create(
                 nfeatures=1000
@@ -172,6 +257,10 @@ class MapMerger(Node):
                 None
             )
 
+            # =================================================
+            # INITIAL ALIGNED MAP
+            # =================================================
+
             aligned_map2 = np.full(
                 (H, W),
                 -1,
@@ -180,9 +269,9 @@ class MapMerger(Node):
 
             alignment_success = False
 
-            # -------------------------------------------------
-            # ORB matching
-            # -------------------------------------------------
+            # =================================================
+            # ORB MATCHING
+            # =================================================
 
             if (
                 des1 is not None
@@ -208,15 +297,35 @@ class MapMerger(Node):
 
                 if len(matches) >= 4:
 
+                    # -----------------------------------------
+                    # Points from robot 2
+                    # -----------------------------------------
+
                     src_pts = np.float32([
                         kp2[m.trainIdx].pt
                         for m in matches
-                    ]).reshape(-1, 1, 2)
+                    ]).reshape(
+                        -1,
+                        1,
+                        2
+                    )
+
+                    # -----------------------------------------
+                    # Corresponding points from robot 1
+                    # -----------------------------------------
 
                     dst_pts = np.float32([
                         kp1[m.queryIdx].pt
                         for m in matches
-                    ]).reshape(-1, 1, 2)
+                    ]).reshape(
+                        -1,
+                        1,
+                        2
+                    )
+
+                    # -----------------------------------------
+                    # Estimate transformation
+                    # -----------------------------------------
 
                     M, mask = cv2.findHomography(
                         src_pts,
@@ -225,26 +334,67 @@ class MapMerger(Node):
                         5.0
                     )
 
+                    # =================================================
+                    # WARP ROBOT 2 MAP
+                    # =================================================
+
                     if M is not None:
 
-                        warped = cv2.warpPerspective(
-                            self.map2,
-                            M,
-                            (W, H),
-                            borderValue=-1
+                        # IMPORTANT:
+                        # OpenCV 4.5.4 can fail when warpPerspective
+                        # receives np.int8.
+                        #
+                        # Convert OccupancyGrid to float32 first.
+
+                        map2_float = self.map2.astype(
+                            np.float32
                         )
 
-                        aligned_map2 = warped
+                        warped = cv2.warpPerspective(
+                            map2_float,
+                            M,
+                            (W, H),
+
+                            # Keep occupancy values discrete.
+                            flags=cv2.INTER_NEAREST,
+
+                            # Unknown outside the warped image.
+                            borderMode=cv2.BORDER_CONSTANT,
+                            borderValue=-1.0
+                        )
+
+                        # -----------------------------------------
+                        # Convert back to OccupancyGrid type
+                        # -----------------------------------------
+
+                        aligned_map2 = np.rint(
+                            warped
+                        ).astype(
+                            np.int8
+                        )
+
                         alignment_success = True
+
+                        # -----------------------------------------
+                        # Count inliers if available
+                        # -----------------------------------------
+
+                        inliers = 0
+
+                        if mask is not None:
+                            inliers = int(
+                                np.sum(mask)
+                            )
 
                         self.get_logger().info(
                             f'ORB alignment successful. '
-                            f'Matches: {len(matches)}'
+                            f'Matches: {len(matches)}, '
+                            f'Inliers: {inliers}'
                         )
 
-            # -------------------------------------------------
-            # Fallback if ORB cannot align
-            # -------------------------------------------------
+            # =================================================
+            # FALLBACK
+            # =================================================
 
             if not alignment_success:
 
@@ -258,9 +408,9 @@ class MapMerger(Node):
                     :w2
                 ] = self.map2
 
-            # -------------------------------------------------
-            # Put map1 into common grid
-            # -------------------------------------------------
+            # =================================================
+            # PUT MAP 1 INTO COMMON GRID
+            # =================================================
 
             common_map1 = np.full(
                 (H, W),
@@ -273,18 +423,18 @@ class MapMerger(Node):
                 :w1
             ] = self.map1
 
-            # -------------------------------------------------
-            # Merge
-            # -------------------------------------------------
+            # =================================================
+            # MERGE
+            # =================================================
 
             global_map = self.merge_values(
                 common_map1,
                 aligned_map2
             )
 
-            # -------------------------------------------------
-            # Publish OccupancyGrid
-            # -------------------------------------------------
+            # =================================================
+            # CREATE OCCUPANCY GRID MESSAGE
+            # =================================================
 
             msg = OccupancyGrid()
 
@@ -296,12 +446,29 @@ class MapMerger(Node):
 
             msg.header.frame_id = 'map'
 
-            msg.info = self.info1
+            # Copy map1 metadata
+            msg.info = copy.deepcopy(
+                self.info1
+            )
 
+            # Update dimensions
             msg.info.width = W
             msg.info.height = H
 
-            msg.data = global_map.flatten().tolist()
+            # Keep the same resolution as robot 1
+            msg.info.resolution = (
+                self.info1.resolution
+            )
+
+            # -------------------------------------------------
+            # Publish merged data
+            # -------------------------------------------------
+
+            msg.data = (
+                global_map
+                .flatten()
+                .tolist()
+            )
 
             self.pub.publish(msg)
 
@@ -310,12 +477,20 @@ class MapMerger(Node):
                 f'{W} x {H}'
             )
 
+        # =====================================================
+        # ERROR HANDLING
+        # =====================================================
+
         except Exception as e:
 
             self.get_logger().error(
                 f'Map merge failed: {e}'
             )
 
+
+# =========================================================
+# MAIN
+# =========================================================
 
 def main(args=None):
 
@@ -330,7 +505,9 @@ def main(args=None):
         pass
 
     finally:
+
         node.destroy_node()
+
         rclpy.shutdown()
 
 
